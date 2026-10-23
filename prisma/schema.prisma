@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  password  String
+  role      Role      @default(USER)
+  createdAt DateTime  @default(now())
+  reports   Report[]
+  claims    Claim[]
+  messages  Message[]
+  notifications Notification[]
+}
+
+model Report {
+  id          String        @id @default(cuid())
+  type        ItemType
+  title       String
+  category    String
+  description String        @db.Text
+  location    String
+  date        DateTime
+  image       String
+  status      ReportStatus  @default(ACTIVE)
+  ownerId     String
+  owner       User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt   DateTime      @default(now())
+  claims      Claim[]
+}
+
+model Claim {
+  id          String      @id @default(cuid())
+  reportId    String
+  claimantId  String
+  note        String      @db.Text
+  status      ClaimStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+  report      Report      @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  claimant    User        @relation(fields: [claimantId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  @@unique([reportId, claimantId])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  claimId   String
+  senderId  String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+  claim     Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  sender    User     @relation(fields: [senderId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String   @db.Text
+  reportId  String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, createdAt])
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum ItemType {
+  LOST
+  FOUND
+}
+
+enum ReportStatus {
+  ACTIVE
+  CLAIMED
+  RECOVERED
+}
+
+enum ClaimStatus {
+  PENDING
+  VERIFIED
+  DECLINED
+}

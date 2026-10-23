@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { createClient } from '@supabase/supabase-js'
 import {
   ArrowRight, Bell, Check, ChevronDown, CircleUserRound, Clock3, Compass, FileText,
   Heart, ImagePlus, KeyRound, LayoutDashboard, LogIn, MapPin, MessageCircle, Package,
@@ -13,7 +14,7 @@ type Report = {
 }
 type Claim = { id: string; reportId: string; claimantId: string; note: string; status: 'pending' | 'verified' | 'declined'; createdAt: string }
 type Message = { id: string; claimId: string; senderId: string; body: string; createdAt: string }
-type User = { id: string; name: string; email: string; password: string; initials: string }
+type User = { id: string; name: string; email: string; initials: string; role: Role }
 type Role = 'user' | 'admin'
 
 const sampleReports: Report[] = [
@@ -25,18 +26,46 @@ const sampleReports: Report[] = [
   { id: 'r6', type: 'lost', title: 'Brown reading glasses', category: 'Other', description: 'Tortoiseshell frames in a soft brown case. Prescription lenses, very meaningful to me.', location: 'Gisozi bus stop', date: '2026-10-09', image: 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=900&q=80', owner: 'Mugisha D.', ownerId: 'seed-6', createdAt: '2026-10-09', status: 'active' },
 ]
 
-const starterUser: User = { id: 'demo-user', name: 'Amina K.', email: 'amina@example.com', password: 'demo', initials: 'AK' }
-const adminUser: User = { id: 'admin-user', name: 'eRanga Admin', email: 'admin@eranga.local', password: 'admin', initials: 'EA' }
+const starterUser: User = { id: 'demo-user', name: 'Amina K.', email: 'amina@example.com', initials: 'AK', role: 'user' }
 const read = <T,>(key: string, fallback: T): T => { try { const item = localStorage.getItem(key); return item ? JSON.parse(item) : fallback } catch { return fallback } }
 const save = (key: string, value: unknown) => localStorage.setItem(key, JSON.stringify(value))
 const today = () => new Date().toISOString().slice(0, 10)
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null
+const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+const apiFetch = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
+  const token = localStorage.getItem('eranga-token')
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
+  const body = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`)
+  return body as T
+}
+const profileFromRow = (row: Record<string, unknown>): User => ({
+  id: String(row.id), name: String(row.name), email: String(row.email), initials: String(row.initials), role: row.role as Role,
+})
+
+const reportFromRow = (row: Record<string, unknown>): Report => ({
+  id: String(row.id),
+  type: row.type as ItemType,
+  title: String(row.title),
+  category: row.category as Category,
+  description: String(row.description),
+  location: String(row.location),
+  date: String(row.date),
+  image: String(row.image || ''),
+  owner: String(row.owner),
+  ownerId: String(row.owner_id),
+  createdAt: String(row.created_at),
+  status: row.status as Report['status'],
+})
 
 function App() {
   const [reports, setReports] = useState<Report[]>(() => read<Report[]>('eranga-reports', sampleReports).map((report) => report.id === 'r2' ? { ...report, image: 'https://cdn.pixabay.com/photo/2017/01/22/19/20/iphone-1991701_1280.jpg' } : report))
   const [users, setUsers] = useState<User[]>(() => read('eranga-users', [starterUser]))
   const [claims, setClaims] = useState<Claim[]>(() => read('eranga-claims', []))
   const [messages, setMessages] = useState<Message[]>(() => read('eranga-messages', []))
-  const [user, setUser] = useState<User | null>(() => read('eranga-session', null))
+  const [user, setUser] = useState<User | null>(() => supabase || apiUrl ? null : read('eranga-session', null))
   const [page, setPage] = useState<'home' | 'browse' | 'dashboard' | 'admin'>('home')
   const [browseType, setBrowseType] = useState<'all' | ItemType>('all')
   const [search, setSearch] = useState('')
@@ -51,10 +80,114 @@ function App() {
   const [mobileMenu, setMobileMenu] = useState(false)
 
   useEffect(() => save('eranga-reports', reports), [reports])
-  useEffect(() => save('eranga-users', users), [users])
-  useEffect(() => save('eranga-claims', claims), [claims])
-  useEffect(() => save('eranga-messages', messages), [messages])
-  useEffect(() => { if (user) save('eranga-session', user); else localStorage.removeItem('eranga-session') }, [user])
+  useEffect(() => { if (!supabase) save('eranga-users', users) }, [users])
+  useEffect(() => { if (!supabase) save('eranga-claims', claims) }, [claims])
+  useEffect(() => { if (!supabase) save('eranga-messages', messages) }, [messages])
+  useEffect(() => { if (!supabase) { if (user) save('eranga-session', user); else localStorage.removeItem('eranga-session') } }, [user])
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+    const loadUserData = async (authUserId: string) => {
+      const [{ data: profile, error: profileError }, { data: reportRows, error: reportError }, { data: claimRows, error: claimError }, { data: messageRows, error: messageError }] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', authUserId).single(),
+        supabase.from('reports').select('*').order('created_at', { ascending: false }),
+        supabase.from('claims').select('*').order('created_at', { ascending: false }),
+        supabase.from('messages').select('*').order('created_at', { ascending: true }),
+      ])
+      if (!active) return
+      if (profileError || !profile) return setNotice(`Could not load your profile: ${profileError?.message || 'profile not found'}`)
+      if (reportError) setNotice(`Could not load community reports: ${reportError.message}`)
+      if (claimError) setNotice(`Could not load claims: ${claimError.message}`)
+      if (messageError) setNotice(`Could not load messages: ${messageError.message}`)
+      setUser(profileFromRow(profile))
+      if (reportRows) setReports(reportRows.map((row) => reportFromRow(row)))
+      if (claimRows) setClaims(claimRows.map((row) => ({ id: String(row.id), reportId: String(row.report_id), claimantId: String(row.claimant_id), note: String(row.note), status: row.status as Claim['status'], createdAt: String(row.created_at) })))
+      if (messageRows) setMessages(messageRows.map((row) => ({ id: String(row.id), claimId: String(row.claim_id), senderId: String(row.sender_id), body: String(row.body), createdAt: String(row.created_at) })))
+    }
+    void supabase.auth.getSession().then(({ data }) => { if (data.session) void loadUserData(data.session.user.id) })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) void loadUserData(session.user.id)
+      else { setUser(null); setClaims([]); setMessages([]) }
+    })
+    return () => { active = false; listener.subscription.unsubscribe() }
+  }, [])
+  useEffect(() => {
+    if (!apiUrl || !localStorage.getItem('eranga-token')) return
+    void Promise.all([apiFetch<{ user: User }>('/me'), apiFetch<{ reports: Report[]; claims: Claim[]; messages: Message[] }>('/data')])
+      .then(([session, data]) => { setUser(session.user); setReports(data.reports); setClaims(data.claims); setMessages(data.messages) })
+      .catch((error: Error) => { localStorage.removeItem('eranga-token'); setNotice(`Could not restore your session: ${error.message}`) })
+  }, [])
+  useEffect(() => {
+    let active = true
+    const loadReports = async () => {
+      try {
+        const nextReports = await apiFetch<Report[]>('/reports')
+        if (active) setReports(nextReports)
+      } catch (error) {
+        if (active) setNotice(`Could not load shared reports: ${(error as Error).message}`)
+      }
+    }
+    void loadReports()
+    const refreshTimer = window.setInterval(() => { void loadReports() }, 5000)
+    const refreshOnFocus = () => { void loadReports() }
+    window.addEventListener('focus', refreshOnFocus)
+    return () => {
+      active = false
+      window.clearInterval(refreshTimer)
+      window.removeEventListener('focus', refreshOnFocus)
+    }
+  }, [])
+  useEffect(() => {
+    const syncReports = (event: StorageEvent) => {
+      if (event.key !== 'eranga-reports' || !event.newValue) return
+      try {
+        setReports(JSON.parse(event.newValue) as Report[])
+      } catch {
+        setNotice('We could not sync the latest community reports.')
+      }
+    }
+    window.addEventListener('storage', syncReports)
+    return () => window.removeEventListener('storage', syncReports)
+  }, [])
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+    const loadReports = async () => {
+      const { data, error } = await supabase.from('reports').select('*').order('created_at', { ascending: false })
+      if (error) {
+        if (active) setNotice(`Could not load community reports: ${error.message}`)
+        return
+      }
+      if (active && data) setReports(data.map((row) => reportFromRow(row)))
+    }
+    void loadReports()
+    const channel = supabase.channel('reports-live').on('postgres_changes', { event: '*', schema: 'public', table: 'reports' }, () => { void loadReports() }).subscribe()
+    return () => {
+      active = false
+      void supabase.removeChannel(channel)
+    }
+  }, [])
+  useEffect(() => {
+    if (!supabase || !user) return
+    let active = true
+    const refresh = async () => {
+      const [{ data: claimRows, error: claimError }, { data: messageRows, error: messageError }] = await Promise.all([
+        supabase.from('claims').select('*').order('created_at', { ascending: false }),
+        supabase.from('messages').select('*').order('created_at', { ascending: true }),
+      ])
+      if (!active) return
+      if (claimError) setNotice(`Could not refresh claims: ${claimError.message}`)
+      if (messageError) setNotice(`Could not refresh messages: ${messageError.message}`)
+      if (claimRows) setClaims(claimRows.map((row) => ({ id: String(row.id), reportId: String(row.report_id), claimantId: String(row.claimant_id), note: String(row.note), status: row.status as Claim['status'], createdAt: String(row.created_at) })))
+      if (messageRows) setMessages(messageRows.map((row) => ({ id: String(row.id), claimId: String(row.claim_id), senderId: String(row.sender_id), body: String(row.body), createdAt: String(row.created_at) })))
+    }
+    void refresh()
+    const channel = supabase.channel(`user-data-${user.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'claims' }, () => { void refresh() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, () => { void refresh() })
+      .subscribe()
+    return () => { active = false; void supabase.removeChannel(channel) }
+  }, [user?.id])
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 3500); return () => window.clearTimeout(timer) }, [notice])
 
   const filteredReports = useMemo(() => reports.filter((report) => {
@@ -70,24 +203,77 @@ function App() {
   const requireAuth = (action: () => void) => { if (user) action(); else requestAuth('login') }
   const handleAuth = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const data = new FormData(event.currentTarget); const name = String(data.get('name') || ''); const email = String(data.get('email')).toLowerCase(); const password = String(data.get('password'))
+    if (apiUrl) {
+      void apiFetch<{ token: string; user: User }>(authMode === 'register' ? '/auth/register' : '/auth/login', { method: 'POST', body: JSON.stringify({ name, email, password }) })
+        .then((result) => { localStorage.setItem('eranga-token', result.token); setUser(result.user); setAuthOpen(false); setNotice('Welcome to eRanga.') })
+        .catch((error: Error) => setNotice(`Authentication failed: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void (async () => {
+        const result = authMode === 'register'
+          ? await supabase.auth.signUp({ email, password, options: { data: { name } } })
+          : await supabase.auth.signInWithPassword({ email, password })
+        if (result.error) return setNotice(`Authentication failed: ${result.error.message}`)
+        setAuthOpen(false)
+        if (authMode === 'register' && !result.data.session) return setNotice('Account created. Check your email to confirm the account, then sign in.')
+        setNotice(authMode === 'register' ? 'Welcome to eRanga. Your account is ready.' : 'Welcome back.')
+      })()
+      return
+    }
     if (authMode === 'register') {
       if (users.some((entry) => entry.email === email)) return setNotice('An account with this email already exists.')
-      const newUser: User = { id: `u-${Date.now()}`, name, email, password, initials: name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase() }
+      const newUser: User = { id: `u-${Date.now()}`, name, email, initials: name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(), role: 'user' }
       setUsers([...users, newUser]); setUser(newUser); setAuthOpen(false); setNotice('Welcome to eRanga. Your account is ready.')
     } else {
-      const found = [...users, adminUser].find((entry) => entry.email === email && entry.password === password)
+      const found = users.find((entry) => entry.email === email && password === 'demo')
       if (!found) return setNotice('We could not match those details. Try the demo: amina@example.com / demo')
       setUser(found); setAuthOpen(false); setNotice(`Welcome back, ${found.name.split(' ')[0]}.`)
     }
   }
-  const handleReport = (event: FormEvent<HTMLFormElement>) => {
+  const handleReport = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!user) return
     const data = new FormData(event.currentTarget); const report: Report = { id: `r-${Date.now()}`, type: String(data.get('type')) as ItemType, title: String(data.get('title')), category: String(data.get('category')) as Category, description: String(data.get('description')), location: String(data.get('location')), date: String(data.get('date')), image: String(data.get('image')) || 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=900&q=80', owner: user.name, ownerId: user.id, createdAt: today(), status: 'active' }
-    setReports([report, ...reports]); setReportOpen(false); setPage('dashboard'); setNotice('Your report is live. We will notify you when there is a likely match.');
+    if (apiUrl) {
+      void apiFetch<{ report: Report; likelyMatches: { report: Report; score: number }[]; notificationSent: boolean }>('/reports', { method: 'POST', body: JSON.stringify({ type: report.type, title: report.title, category: report.category, description: report.description, location: report.location, date: report.date, image: report.image }) })
+        .then((created) => { setReports((current) => [created.report, ...current]); setReportOpen(false); setPage('dashboard'); setNotice(created.notificationSent ? `Your report is live. We found ${created.likelyMatches.length} likely match${created.likelyMatches.length === 1 ? '' : 'es'} and sent notifications.` : 'Your report is live. We will notify you when there is a likely match.') })
+        .catch((error: Error) => setNotice(`Your report could not be published: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      const { data: inserted, error } = await supabase.from('reports').insert({
+        type: report.type, title: report.title, category: report.category, description: report.description,
+        location: report.location, date: report.date, image: report.image, owner: report.owner,
+        owner_id: user.id, status: report.status,
+      }).select().single()
+      if (error || !inserted) {
+        setNotice(`Your report could not be published: ${error?.message || 'the server returned no report'}`)
+        return
+      }
+      setReports((current) => [reportFromRow(inserted), ...current.filter((entry) => entry.id !== String(inserted.id))])
+    } else {
+      setReports((current) => [report, ...current])
+    }
+    setReportOpen(false); setPage('dashboard'); setNotice('Your report is live. We will notify you when there is a likely match.');
   }
   const submitClaim = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!claimOpen || !user) return
-    const data = new FormData(event.currentTarget); setClaims([...claims, { id: `c-${Date.now()}`, reportId: claimOpen.id, claimantId: user.id, note: String(data.get('note')), status: 'pending', createdAt: today() }]); setClaimOpen(null); setNotice('Claim sent securely. The reporter will review your verification details.')
+    const data = new FormData(event.currentTarget); const note = String(data.get('note'))
+    if (apiUrl) {
+      void apiFetch<Claim>('/claims', { method: 'POST', body: JSON.stringify({ reportId: claimOpen.id, note }) })
+        .then((created) => { setClaims((current) => [created, ...current]); setClaimOpen(null); setNotice('Claim sent securely.') })
+        .catch((error: Error) => setNotice(`Your claim could not be sent: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void supabase.from('claims').insert({ report_id: claimOpen.id, claimant_id: user.id, note }).select().single().then(({ data: inserted, error }) => {
+        if (error || !inserted) return setNotice(`Your claim could not be sent: ${error?.message || 'the server returned no claim'}`)
+        setClaims((current) => [{ id: String(inserted.id), reportId: String(inserted.report_id), claimantId: String(inserted.claimant_id), note: String(inserted.note), status: inserted.status as Claim['status'], createdAt: String(inserted.created_at) }, ...current])
+        setClaimOpen(null); setNotice('Claim sent securely. The reporter will review your verification details.')
+      })
+      return
+    }
+    setClaims([...claims, { id: `c-${Date.now()}`, reportId: claimOpen.id, claimantId: user.id, note, status: 'pending', createdAt: today() }]); setClaimOpen(null); setNotice('Claim sent securely. The reporter will review your verification details.')
   }
   const ownReports = reports.filter((report) => report.ownerId === user?.id)
   const relatedReports = selected ? reports.filter((report) => report.id !== selected.id && report.status === 'active').map((report) => ({ report, score: matchScore(selected, report) })).filter((match) => match.score > 0).sort((left, right) => right.score - left.score).slice(0, 3) : []
@@ -98,20 +284,84 @@ function App() {
     event.preventDefault(); if (!messageOpen || !user) return
     const data = new FormData(event.currentTarget); const body = String(data.get('body')).trim()
     if (!body) return
+    if (apiUrl && messageOpen.status !== 'verified') {
+      setNotice('Messaging opens after the report owner verifies your claim.')
+      return
+    }
+    if (apiUrl) {
+      void apiFetch<Message>('/messages', { method: 'POST', body: JSON.stringify({ claimId: messageOpen.id, body }) })
+        .then((created) => { setMessages((current) => [...current, created]); event.currentTarget.reset() })
+        .catch((error: Error) => setNotice(`Your message could not be sent: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void supabase.from('messages').insert({ claim_id: messageOpen.id, sender_id: user.id, body }).select().single().then(({ data: inserted, error }) => {
+        if (error || !inserted) return setNotice(`Your message could not be sent: ${error?.message || 'the server returned no message'}`)
+        setMessages((current) => [...current, { id: String(inserted.id), claimId: String(inserted.claim_id), senderId: String(inserted.sender_id), body: String(inserted.body), createdAt: String(inserted.created_at) }])
+        event.currentTarget.reset()
+      })
+      return
+    }
     setMessages([...messages, { id: `m-${Date.now()}`, claimId: messageOpen.id, senderId: user.id, body, createdAt: new Date().toLocaleString() }])
     event.currentTarget.reset()
   }
   const verifyClaim = (id: string) => {
     const claim = claims.find((entry) => entry.id === id); if (!claim) return
+    if (apiUrl) {
+      void apiFetch<Claim>(`/claims/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'verified' }) })
+        .then((updated) => {
+          setClaims((current) => current.map((entry) => entry.id === id ? updated : entry))
+          setReports((current) => current.map((report) => report.id === claim.reportId ? { ...report, status: 'claimed' } : report))
+          setNotice('Claim verified. A private return chat is now open for both people.')
+        })
+        .catch((error: Error) => setNotice(`Claim could not be verified: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void supabase.from('claims').update({ status: 'verified' }).eq('id', id).then(({ error }) => {
+        if (error) return setNotice(`Claim could not be verified: ${error.message}`)
+        setClaims(claims.map((entry) => entry.id === id ? { ...entry, status: 'verified' } : entry))
+        void supabase.from('reports').update({ status: 'claimed' }).eq('id', claim.reportId).then(({ error: reportError }) => { if (reportError) setNotice(`Claim verified, but report status could not be updated: ${reportError.message}`) })
+        setNotice('Claim verified. A private return chat is now open for both people.')
+      })
+      return
+    }
     setClaims(claims.map((entry) => entry.id === id ? { ...entry, status: 'verified' } : entry))
     setReports(reports.map((report) => report.id === claim.reportId ? { ...report, status: 'claimed' } : report))
     setNotice('Claim verified. A private return chat is now open for both people.')
   }
   const declineClaim = (id: string) => {
+    if (apiUrl) {
+      void apiFetch<Claim>(`/claims/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'declined' }) })
+        .then((updated) => { setClaims((current) => current.map((entry) => entry.id === id ? updated : entry)); setNotice('Claim declined. The claimant will not be given access to a return chat.') })
+        .catch((error: Error) => setNotice(`Claim could not be declined: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void supabase.from('claims').update({ status: 'declined' }).eq('id', id).then(({ error }) => {
+        if (error) return setNotice(`Claim could not be declined: ${error.message}`)
+        setClaims(claims.map((entry) => entry.id === id ? { ...entry, status: 'declined' } : entry)); setNotice('Claim declined. The claimant will not be given access to a return chat.')
+      })
+      return
+    }
     setClaims(claims.map((entry) => entry.id === id ? { ...entry, status: 'declined' } : entry))
     setNotice('Claim declined. The claimant will not be given access to a return chat.')
   }
   const recoverClaim = (claim: Claim) => {
+    if (apiUrl) {
+      void apiFetch<Claim>(`/claims/${claim.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'verified' }) })
+        .then(() => apiFetch(`/reports/${claim.reportId}`, { method: 'PATCH', body: JSON.stringify({ status: 'recovered' }) }))
+        .then(() => { setReports((current) => current.map((report) => report.id === claim.reportId ? { ...report, status: 'recovered' } : report)); setNotice('Marked as recovered. Thank you for completing the return.') })
+        .catch((error: Error) => setNotice(`Report could not be marked recovered: ${error.message}`))
+      return
+    }
+    if (supabase) {
+      void supabase.from('reports').update({ status: 'recovered' }).eq('id', claim.reportId).then(({ error }) => {
+        if (error) return setNotice(`Report could not be marked recovered: ${error.message}`)
+        setReports(reports.map((report) => report.id === claim.reportId ? { ...report, status: 'recovered' } : report)); setNotice('Marked as recovered. Thank you for completing the return.')
+      })
+      return
+    }
     setReports(reports.map((report) => report.id === claim.reportId ? { ...report, status: 'recovered' } : report))
     setNotice('Marked as recovered. Thank you for completing the return.')
   }
@@ -119,13 +369,16 @@ function App() {
   return <div className="app-shell">
     <header className="site-header"><button className="brand" onClick={() => { setPage('home'); setMobileMenu(false) }}><span className="brand-mark"><Package size={18} /></span><span>eRanga</span></button>
       <nav className={mobileMenu ? 'main-nav open' : 'main-nav'}><button className={page === 'home' ? 'nav-active' : ''} onClick={() => { setPage('home'); setMobileMenu(false) }}>Home</button><button className={page === 'browse' ? 'nav-active' : ''} onClick={() => { goBrowse(); setMobileMenu(false) }}>Browse items</button><button onClick={() => requireAuth(() => setReportOpen(true))}>Report an item</button></nav>
-      <div className="header-actions">{user ? <><button className="icon-button notification" title="Notifications" onClick={() => setPage(user.email === adminUser.email ? 'admin' : 'dashboard')}><Bell size={18} />{notifications.length > 0 && <span />}</button><button className="profile-button" onClick={() => setPage(user.email === adminUser.email ? 'admin' : 'dashboard')}><span className="avatar">{user.initials}</span><span className="profile-name">{user.name.split(' ')[0]}</span><ChevronDown size={15} /></button></> : <><button className="text-button desktop-only" onClick={() => requestAuth('login')}>Sign in</button><button className="button button-dark compact" onClick={() => requestAuth('register')}><UserPlus size={16} /> Join eRanga</button></>}<button className="menu-toggle" onClick={() => setMobileMenu(!mobileMenu)}><Menu size={21} /></button></div>
+      <div className="header-actions">{user ? <><button className="icon-button notification" title="Notifications" onClick={() => setPage(user.role === 'admin' ? 'admin' : 'dashboard')}><Bell size={18} />{notifications.length > 0 && <span />}</button><button className="profile-button" onClick={() => setPage(user.role === 'admin' ? 'admin' : 'dashboard')}><span className="avatar">{user.initials}</span><span className="profile-name">{user.name.split(' ')[0]}</span><ChevronDown size={15} /></button></> : <><button className="text-button desktop-only" onClick={() => requestAuth('login')}>Sign in</button><button className="button button-dark compact" onClick={() => requestAuth('register')}><UserPlus size={16} /> Join eRanga</button></>}<button className="menu-toggle" onClick={() => setMobileMenu(!mobileMenu)}><Menu size={21} /></button></div>
     </header>
 
     {page === 'home' && <Home goBrowse={goBrowse} openReport={() => requireAuth(() => setReportOpen(true))} requestAuth={requestAuth} />}
     {page === 'browse' && <main className="page-content browse-page"><section className="browse-heading"><div><p className="eyebrow"><Compass size={14} /> Community board</p><h1>Find what matters.</h1><p className="subtext">Search recent reports from people around Kigali and beyond.</p></div><button className="button button-coral" onClick={() => requireAuth(() => setReportOpen(true))}><Plus size={18} /> Report an item</button></section><section className="search-panel"><div className="search-input"><Search size={19} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search an item, place or keyword" /></div><select value={category} onChange={(event) => setCategory(event.target.value)}><option>All categories</option>{['Electronics', 'Bags & wallets', 'Keys', 'Documents', 'Clothing', 'Other'].map((entry) => <option key={entry}>{entry}</option>)}</select><div className="type-tabs"><button className={browseType === 'all' ? 'selected' : ''} onClick={() => setBrowseType('all')}>All</button><button className={browseType === 'lost' ? 'selected' : ''} onClick={() => setBrowseType('lost')}>Lost</button><button className={browseType === 'found' ? 'selected' : ''} onClick={() => setBrowseType('found')}>Found</button></div></section><div className="results-bar"><span><strong>{filteredReports.length}</strong> reports near you</span><span className="privacy-note"><ShieldCheck size={14} /> Exact contact details stay private</span></div>{filteredReports.length ? <div className="item-grid">{filteredReports.map((report) => <ItemCard key={report.id} report={report} onClick={() => setSelected(report)} />)}</div> : <EmptyState reset={() => { setSearch(''); setCategory('All categories'); setBrowseType('all') }} />}</main>}
-    {page === 'dashboard' && <Dashboard user={user} reports={ownReports} allReports={reports} claims={incomingClaims} myClaims={myClaims} onBrowse={() => goBrowse()} onReport={() => setReportOpen(true)} onSelect={setSelected} onVerify={verifyClaim} onDecline={declineClaim} onRecover={recoverClaim} onMessage={setMessageOpen} onLogout={() => { setUser(null); setPage('home'); setNotice('You have been signed out.') }} />}
-    {page === 'admin' && user?.email === adminUser.email && <AdminDashboard user={user} users={users} reports={reports} claims={claims} onVerify={verifyClaim} onDecline={declineClaim} onRecover={recoverClaim} onRemoveReport={(id) => { setReports(reports.filter((report) => report.id !== id)); setNotice('Report removed from the community board.') }} onLogout={() => { setUser(null); setPage('home'); setNotice('You have been signed out.') }} />}
+    {page === 'dashboard' && <Dashboard user={user} reports={ownReports} allReports={reports} claims={incomingClaims} myClaims={myClaims} onBrowse={() => goBrowse()} onReport={() => setReportOpen(true)} onSelect={setSelected} onVerify={verifyClaim} onDecline={declineClaim} onRecover={recoverClaim} onMessage={setMessageOpen} onLogout={() => { if (apiUrl) localStorage.removeItem('eranga-token'); if (supabase) void supabase.auth.signOut(); setUser(null); setPage('home'); setNotice('You have been signed out.') }} />}
+    {page === 'admin' && user?.role === 'admin' && <AdminDashboard user={user} users={users} reports={reports} claims={claims} onVerify={verifyClaim} onDecline={declineClaim} onRecover={recoverClaim} onRemoveReport={(id) => {
+      if (supabase) void supabase.from('reports').delete().eq('id', id).then(({ error }) => { if (error) return setNotice(`Report could not be removed: ${error.message}`); setReports((current) => current.filter((report) => report.id !== id)); setNotice('Report removed from the community board.') })
+      else { setReports(reports.filter((report) => report.id !== id)); setNotice('Report removed from the community board.') }
+    }} onLogout={() => { if (apiUrl) localStorage.removeItem('eranga-token'); if (supabase) void supabase.auth.signOut(); setUser(null); setPage('home'); setNotice('You have been signed out.') }} />}
 
     <footer className="site-footer"><div className="footer-brand"><span className="brand-mark"><Package size={17} /></span><strong>eRanga</strong><span>Bring it back home.</span></div><span>Built for thoughtful communities · Kigali, Rwanda</span></footer>
     {notice && <div className="toast"><CheckCircle2 size={18} /><span>{notice}</span><button onClick={() => setNotice('')}><X size={15} /></button></div>}
